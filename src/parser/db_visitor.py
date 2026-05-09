@@ -247,6 +247,31 @@ class DBVisitor(Visitor):
     def visit_select(self, node: SelectStmt):
         db = self._get_table(node.table)
 
+        if isinstance(node.where, InSpatialCond):
+            sp = node.where.spatial_condition
+            col_name = node.where.left
+            if col_name in db.point_columns:
+                col_x, col_y = db.point_columns[col_name]
+            else:
+                col_x, col_y = col_name, col_name
+
+            if sp.search_type == "radius":
+                res_json = db.select_radius_json(col_x, col_y, sp.x, sp.y, sp.search_value)
+            elif sp.search_type == "k":
+                res_json = db.select_knn_json(col_x, col_y, sp.x, sp.y, sp.search_value)
+            else:
+                res_json = {"metrics": {"time_ms": 0, "heap_reads": 0, "heap_writes": 0, "index_reads": 0, "index_writes": 0, "total_reads": 0, "total_writes": 0}}
+
+            self.last_metrics = res_json.get("metrics")
+            if self.last_metrics:
+                self._print_metrics(self.last_metrics)
+
+            return {
+                "is_spatial": True,
+                "spatial_data": res_json,
+                "metrics": self.last_metrics
+            }
+
         if node.where is None:
             records, m = db.select_all(metrics=True)
         else:
@@ -284,6 +309,7 @@ class DBVisitor(Visitor):
         return {
             "columns": col_names,
             "rows": records,
+            "metrics": m
         }
 
     class _SelectExecutor:
@@ -372,7 +398,7 @@ class DBVisitor(Visitor):
         self.last_metrics = m
         print(f"Insertado en '{node.table}': {tuple(node.values)} -> RID {rid}")
         self._print_metrics(m)
-        return rid
+        return {"rid": rid, "metrics": m}
 
     # ================================================================ #
     #  DELETE                                                           #
@@ -391,7 +417,7 @@ class DBVisitor(Visitor):
         self.last_metrics = m
         print(f"Eliminados {deleted} registros de '{node.table}' donde {cond.left} = {cond.right!r}")
         self._print_metrics(m)
-        return deleted
+        return {"deleted": deleted, "metrics": m}
 
     # ================================================================ #
     #  Condition visitors (dispatch directo — no usados en SELECT)      #
