@@ -123,6 +123,7 @@ class Db2Parser {
     const columns: Array<{
       name: string;
       type: (typeof DB2_DATA_TYPES)[number];
+      length?: number;
       index: (typeof DB2_INDEX_TYPES)[number];
       primaryKey?: boolean;
     }> = [];
@@ -130,6 +131,7 @@ class Db2Parser {
     do {
       const name = this.consumeIdentifier("Expected a column name.");
       const type = this.consumeDataType("Expected a valid type (INT, FLOAT, VARCHAR, POINT).");
+      const length = this.parseOptionalVarcharLength(type);
       
       let primaryKey = false;
       if (this.matchKeyword("PRIMARY")) {
@@ -143,7 +145,7 @@ class Db2Parser {
         index = this.consumeIndexType("Expected an index type after INDEX.");
       }
 
-      columns.push({ name, type, index, primaryKey });
+      columns.push({ name, type, length, index, primaryKey });
     } while (this.matchSymbol(","));
 
     this.consumeSymbol(")", "Expected ) after column definitions.");
@@ -270,6 +272,21 @@ class Db2Parser {
     }
 
     throw new Db2ParserError(message, this.contextFromToken(token));
+  }
+
+  private parseOptionalVarcharLength(type: (typeof DB2_DATA_TYPES)[number]): number | undefined {
+    if (type !== "VARCHAR" || !this.matchSymbol("(")) {
+      return undefined;
+    }
+
+    const length = this.parseNumberLiteral("Expected a numeric length inside VARCHAR(...).");
+
+    if (!Number.isInteger(length) || length <= 0) {
+      throw new Db2ParserError("VARCHAR length must be a positive integer.", this.contextFromToken(this.previous()));
+    }
+
+    this.consumeSymbol(")", "Expected ) after VARCHAR length.");
+    return length;
   }
 
   private consumeIndexType(message: string): (typeof DB2_INDEX_TYPES)[number] {

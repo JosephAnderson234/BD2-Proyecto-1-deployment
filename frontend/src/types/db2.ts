@@ -7,6 +7,7 @@ export type Db2DataType = "INT" | "FLOAT" | "VARCHAR" | "POINT";
 export interface Db2Column {
   name: string;
   type: Db2DataType;
+  length?: number;
   index: Db2IndexType;
   nullable?: boolean;
 }
@@ -78,6 +79,7 @@ export type Db2Statement =
       columns: Array<{
         name: string;
         type: Db2DataType;
+        length?: number;
         index: Db2IndexType;
         primaryKey?: boolean;
       }>;

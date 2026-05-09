@@ -775,7 +775,7 @@ export function Db2Playground({ initialCatalog }: Db2PlaygroundProps) {
                     SELECT requires a WHERE clause, and supports <span className="font-mono text-foreground">*</span> or explicit column lists.
                   </li>
                   <li>WHERE supports comparisons, BETWEEN, and IN predicates for SELECT.</li>
-                  <li>CREATE TABLE accepts PRIMARY KEY, column indexes and optional FROM FILE source.</li>
+                  <li>CREATE TABLE accepts PRIMARY KEY, column indexes, VARCHAR(n) lengths and optional FROM FILE source.</li>
                   <li>INSERT and DELETE update the in-memory catalog (DELETE restricted to comparisons).</li>
                 </ul>
               </div>

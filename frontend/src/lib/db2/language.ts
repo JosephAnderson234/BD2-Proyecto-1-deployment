@@ -48,7 +48,7 @@ export const DB2_LANGUAGE_SNIPPETS = [
   {
     label: "CREATE TABLE ...",
     detail: "Create a table with typed columns",
-    insertText: "CREATE TABLE ${1:table} (${2:id} INT INDEX BTREE, ${3:name} VARCHAR);",
+    insertText: "CREATE TABLE ${1:table} (${2:id} INT INDEX BTREE, ${3:name} VARCHAR(${4:40}));",
   },
   {
     label: "INSERT INTO ... VALUES",
