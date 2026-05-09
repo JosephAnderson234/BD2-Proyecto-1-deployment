@@ -27,7 +27,7 @@ class DataBase:
     INDEX_TYPES = {"bplus", "rtree", "sequential", "hash"}
 
     def __init__(self, table_name, schema=None, primary_key=None,
-                 pk_index_type="bplus"):
+                 pk_index_type="bplus", max_aux=None):
         self.table_name = table_name
         self.sm = SchemaManager(table_name)
         self.pm = None
@@ -35,6 +35,7 @@ class DataBase:
         self.primary_key = None   # "col_name" o None
         self.record_count = 0
         self.pk_index_type = pk_index_type
+        self._max_aux = max_aux
 
         # True cuando el almacenamiento primario es un SequentialFile clustered
         self.uses_clustered_seq = False
@@ -162,6 +163,7 @@ class DataBase:
                     record_format=record_format,
                     key_position=key_pos,
                     unique=True,
+                    max_aux=self._max_aux,
                 )
                 # Registrar como indice PK
                 self.indexes[primary_key] = {

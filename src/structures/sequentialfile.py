@@ -100,6 +100,7 @@ class SequentialFile:
         self.num_pages = 1       # page 0 = metadata
         self.first_aux = -1      # first aux page
         self.num_deleted = 0     # soft-deleted entries (clustered mode)
+        self._last_aux = -1      # cache: last aux page (avoids traversal)
 
         # PageManager para I/O de paginas
         if pm is not None:
@@ -252,6 +253,61 @@ class SequentialFile:
         return struct.unpack(self.key_fmt, packed)[0]
 
     # ------------------------------------------------------------------ #
+    #  BINARY SEARCH OVER CONTIGUOUS MAIN PAGES                            #
+    # ------------------------------------------------------------------ #
+
+    def _num_main_pages(self):
+        """Derive count of contiguous main pages from metadata.
+        After reconstruction, main pages are [head_page, head_page+N-1]."""
+        if self.head_page == -1:
+            return 0
+        if self.first_aux != -1:
+            return self.first_aux - self.head_page
+        return self.num_pages - self.head_page
+
+    def _find_main_page(self, key):
+        """Binary search over contiguous main pages for an exact key.
+        Returns (page_id, entries, next_page) or None."""
+        nmp = self._num_main_pages()
+        if nmp == 0:
+            return None
+        lo = self.head_page
+        hi = lo + nmp - 1
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            entries, next_page = self._read_data_page(mid)
+            if not entries:
+                return None
+            if key < entries[0][0]:
+                hi = mid - 1
+            elif key > entries[-1][0]:
+                lo = mid + 1
+            else:
+                return (mid, entries, next_page)
+        return None
+
+    def _find_first_main_page_ge(self, key):
+        """Binary search: first main page whose last key >= key."""
+        nmp = self._num_main_pages()
+        if nmp == 0:
+            return None
+        lo = self.head_page
+        hi = lo + nmp - 1
+        result = None
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            entries, _ = self._read_data_page(mid)
+            if not entries:
+                lo = mid + 1
+                continue
+            if entries[-1][0] >= key:
+                result = mid
+                hi = mid - 1
+            else:
+                lo = mid + 1
+        return result
+
+    # ------------------------------------------------------------------ #
     #  TRAVERSAL                                                           #
     # ------------------------------------------------------------------ #
 
@@ -301,15 +357,21 @@ class SequentialFile:
         key = record[self.key_position]
         key = self._normalize_key(key)
 
-        if self.unique and self._update_existing(key, record):
-            return self._find_location(key)
+        loc = self._update_existing(key, record)
+        if self.unique and loc:
+            return loc
 
-        self._append_to_aux(key, record)
+        loc = self._append_to_aux(key, record)
         self.num_aux += 1
         self._save_metadata()
         self._check_reconstruct()
 
-        return self._find_location(key)
+        if self._just_reconstructed:
+            # Reconstruction rewrote all pages; cached location is stale.
+            # Don't clear the flag here — dbengine reads it to skip
+            # secondary index updates (already rebuilt by on_reconstruct).
+            return self._find_location(key)
+        return loc
 
     def delete_record(self, page_id, slot):
         """Soft-delete: marca el slot como eliminado sin desplazar otros."""
@@ -345,19 +407,13 @@ class SequentialFile:
 
     def _find_location(self, key):
         """Encuentra (page_id, slot) de un registro activo por su clave."""
-        page_id = self.head_page
-        while page_id != -1:
-            entries, next_page = self._read_data_page(page_id)
-            if entries:
-                idx = self._bisect_left(entries, key)
-                if idx < len(entries) and entries[idx][0] == key:
-                    if not isinstance(entries[idx][1], _Deleted):
-                        return (page_id, idx)
-                    # Deleted entry con misma clave, buscar en aux
-                    break
-                if entries[-1][0] >= key:
-                    break
-            page_id = next_page
+        result = self._find_main_page(key)
+        if result is not None:
+            page_id, entries, _ = result
+            idx = self._bisect_left(entries, key)
+            if idx < len(entries) and entries[idx][0] == key:
+                if not isinstance(entries[idx][1], _Deleted):
+                    return (page_id, idx)
 
         page_id = self.first_aux
         while page_id != -1:
@@ -373,13 +429,9 @@ class SequentialFile:
 
     def _is_main_page(self, target_page_id):
         """Determina si una pagina pertenece a la cadena main."""
-        page_id = self.head_page
-        while page_id != -1:
-            if page_id == target_page_id:
-                return True
-            _, next_page = self._read_data_page(page_id)
-            page_id = next_page
-        return False
+        if self.head_page == -1:
+            return False
+        return self.head_page <= target_page_id < self.head_page + self._num_main_pages()
 
     # ------------------------------------------------------------------ #
     #  SEARCH                                                              #
@@ -388,22 +440,13 @@ class SequentialFile:
     def search(self, key):
         key = self._normalize_key(key)
 
-        page_id = self.head_page
-        while page_id != -1:
-            entries, next_page = self._read_data_page(page_id)
-            if not entries:
-                page_id = next_page
-                continue
-            if entries[-1][0] < key:
-                page_id = next_page
-                continue
+        result = self._find_main_page(key)
+        if result is not None:
+            _, entries, _ = result
             idx = self._bisect_left(entries, key)
             if idx < len(entries) and entries[idx][0] == key:
                 if not isinstance(entries[idx][1], _Deleted):
                     return entries[idx][1]
-                # Deleted, continue to aux
-                break
-            break
 
         page_id = self.first_aux
         while page_id != -1:
@@ -421,29 +464,21 @@ class SequentialFile:
         key = self._normalize_key(key)
         all_rids = []
 
-        page_id = self.head_page
-        found = False
-        while page_id != -1:
-            entries, next_page = self._read_data_page(page_id)
-            if not entries:
-                page_id = next_page
-                continue
-            if not found and entries[-1][0] < key:
-                page_id = next_page
-                continue
-
-            idx = self._bisect_left(entries, key)
-            while idx < len(entries) and entries[idx][0] == key:
-                found = True
-                if not isinstance(entries[idx][1], _Deleted):
-                    all_rids.append(entries[idx][1])
-                idx += 1
-
-            if found and idx < len(entries):
-                break
-            if not found and entries[0][0] > key:
-                break
-            page_id = next_page
+        start = self._find_first_main_page_ge(key)
+        if start is not None:
+            nmp = self._num_main_pages()
+            end_page = self.head_page + nmp
+            page_id = start
+            while page_id < end_page:
+                entries, _ = self._read_data_page(page_id)
+                if not entries or entries[0][0] > key:
+                    break
+                idx = self._bisect_left(entries, key)
+                while idx < len(entries) and entries[idx][0] == key:
+                    if not isinstance(entries[idx][1], _Deleted):
+                        all_rids.append(entries[idx][1])
+                    idx += 1
+                page_id += 1
 
         page_id = self.first_aux
         while page_id != -1:
@@ -467,24 +502,21 @@ class SequentialFile:
         end_key = self._normalize_key(end_key)
         candidates = []
 
-        page_id = self.head_page
-        while page_id != -1:
-            entries, next_page = self._read_data_page(page_id)
-            if not entries:
-                page_id = next_page
-                continue
-            if entries[-1][0] < begin_key:
-                page_id = next_page
-                continue
-            if entries[0][0] > end_key:
-                break
-
-            idx = self._bisect_left(entries, begin_key)
-            while idx < len(entries) and entries[idx][0] <= end_key:
-                if not isinstance(entries[idx][1], _Deleted):
-                    candidates.append(entries[idx])
-                idx += 1
-            page_id = next_page
+        start = self._find_first_main_page_ge(begin_key)
+        if start is not None:
+            nmp = self._num_main_pages()
+            end_page = self.head_page + nmp
+            page_id = start
+            while page_id < end_page:
+                entries, _ = self._read_data_page(page_id)
+                if not entries or entries[0][0] > end_key:
+                    break
+                idx = self._bisect_left(entries, begin_key)
+                while idx < len(entries) and entries[idx][0] <= end_key:
+                    if not isinstance(entries[idx][1], _Deleted):
+                        candidates.append(entries[idx])
+                    idx += 1
+                page_id += 1
 
         page_id = self.first_aux
         while page_id != -1:
@@ -524,23 +556,17 @@ class SequentialFile:
         self._check_reconstruct()
 
     def _update_existing(self, key, value):
-        page_id = self.head_page
-        while page_id != -1:
-            entries, next_page = self._read_data_page(page_id)
-            if not entries:
-                page_id = next_page
-                continue
-            if entries[-1][0] < key:
-                page_id = next_page
-                continue
+        """Busca entrada existente y la actualiza in-place.
+        Retorna (page_id, slot) si actualizo, None si no encontro."""
+        result = self._find_main_page(key)
+        if result is not None:
+            page_id, entries, next_page = result
             idx = self._bisect_left(entries, key)
             if idx < len(entries) and entries[idx][0] == key:
-                if self.clustered and isinstance(entries[idx][1], _Deleted):
-                    break  # Skip deleted, proceed with normal insert
-                entries[idx] = (key, value)
-                self._write_data_page(page_id, entries, next_page)
-                return True
-            break
+                if not (self.clustered and isinstance(entries[idx][1], _Deleted)):
+                    entries[idx] = (key, value)
+                    self._write_data_page(page_id, entries, next_page)
+                    return (page_id, idx)
 
         page_id = self.first_aux
         while page_id != -1:
@@ -548,42 +574,47 @@ class SequentialFile:
             if entries:
                 idx = self._bisect_left(entries, key)
                 if idx < len(entries) and entries[idx][0] == key:
-                    if self.clustered and isinstance(entries[idx][1], _Deleted):
-                        pass  # Skip deleted in aux
-                    else:
+                    if not (self.clustered and isinstance(entries[idx][1], _Deleted)):
                         entries[idx] = (key, value)
                         self._write_data_page(page_id, entries, next_page)
-                        return True
+                        return (page_id, idx)
             page_id = next_page
 
-        return False
+        return None
 
     def _append_to_aux(self, key, value):
+        """Inserta en aux pages. Retorna (page_id, slot) de la entrada."""
         if self.first_aux == -1:
             pid = self._alloc_page()
             self._write_data_page(pid, [(key, value)], -1)
             self.first_aux = pid
-            return
+            self._last_aux = pid
+            return (pid, 0)
 
-        page_id = self.first_aux
-        last_id = page_id
-        last_entries = []
-        while page_id != -1:
-            entries, next_page = self._read_data_page(page_id)
-            last_id = page_id
-            last_entries = entries
-            if next_page == -1:
-                break
-            page_id = next_page
+        # Lazy init: traverse once to find last aux page, then cache
+        if self._last_aux == -1:
+            page_id = self.first_aux
+            while page_id != -1:
+                _, next_page = self._read_data_page(page_id)
+                if next_page == -1:
+                    self._last_aux = page_id
+                    break
+                page_id = next_page
+
+        last_id = self._last_aux
+        last_entries, _ = self._read_data_page(last_id)
 
         if len(last_entries) < self.entries_per_page:
             idx = self._bisect_left(last_entries, key)
             last_entries.insert(idx, (key, value))
             self._write_data_page(last_id, last_entries, -1)
+            return (last_id, idx)
         else:
             new_pid = self._alloc_page()
             self._write_data_page(new_pid, [(key, value)], -1)
             self._write_data_page(last_id, last_entries, new_pid)
+            self._last_aux = new_pid
+            return (new_pid, 0)
 
     def _check_reconstruct(self):
         if self.num_aux >= self.max_aux:
@@ -605,6 +636,7 @@ class SequentialFile:
             self.num_aux = 0
             self.head_page = -1
             self.first_aux = -1
+            self._last_aux = -1
             self.num_deleted = 0
             self._save_metadata()
             self.pm.truncate(1)
@@ -626,6 +658,7 @@ class SequentialFile:
         self.num_main = len(all_entries)
         self.num_aux = 0
         self.first_aux = -1
+        self._last_aux = -1
         self.num_deleted = 0  # compaction: all deleted entries gone
         self._save_metadata()
 
@@ -644,18 +677,9 @@ class SequentialFile:
         key = self._normalize_key(key)
 
         # --- Search main pages ---
-        page_id = self.head_page
-        prev_page_id = -1
-        while page_id != -1:
-            entries, next_page = self._read_data_page(page_id)
-            if not entries:
-                prev_page_id = page_id
-                page_id = next_page
-                continue
-            if entries[-1][0] < key:
-                prev_page_id = page_id
-                page_id = next_page
-                continue
+        result = self._find_main_page(key)
+        if result is not None:
+            page_id, entries, next_page = result
 
             found = None
             for i, (k, val) in enumerate(entries):
@@ -670,7 +694,6 @@ class SequentialFile:
 
             if found is not None:
                 if self.clustered:
-                    # Soft delete: mark as deleted, don't shift slots
                     k_found, v_found = entries[found]
                     entries[found] = (k_found, _Deleted(v_found))
                     self._write_data_page(page_id, entries, next_page)
@@ -678,11 +701,11 @@ class SequentialFile:
                     self._save_metadata()
                     return True
                 else:
-                    # Index mode: physical remove
                     entries.pop(found)
                     if entries:
                         self._write_data_page(page_id, entries, next_page)
                     else:
+                        prev_page_id = page_id - 1 if page_id > self.head_page else -1
                         if prev_page_id == -1:
                             self.head_page = next_page
                         else:
@@ -691,8 +714,6 @@ class SequentialFile:
                     self.num_main -= 1
                     self._save_metadata()
                     return True
-
-            break
 
         # --- Search aux pages ---
         page_id = self.first_aux

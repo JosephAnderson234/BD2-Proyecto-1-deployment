@@ -91,7 +91,7 @@ def cleanup():
 
 # ── Table creation ───────────────────────────────────────────────────────────
 
-def create_table(technique, table_name="bench"):
+def create_table(technique, table_name="bench", n=None):
     """Crea una tabla con la tecnica de indexacion indicada sobre la PK 'id'.
 
     - bplus:      HeapFile + B+ Tree en PK
@@ -103,8 +103,12 @@ def create_table(technique, table_name="bench"):
                         primary_key="id", pk_index_type="bplus")
 
     elif technique == "sequential":
+        # Balance: ~10 reconstrucciones totales, aux area pequena
+        # para que _update_existing no recorra demasiadas paginas
+        max_aux = max(62, n // 10) if n else None
         return DataBase(table_name, schema=SCHEMA,
-                        primary_key="id", pk_index_type="sequential")
+                        primary_key="id", pk_index_type="sequential",
+                        max_aux=max_aux)
 
     elif technique == "hash":
         # Crear con bplus auto, reemplazar por hash
@@ -185,7 +189,7 @@ def run_benchmark():
             print(f"\n  --- {label} ---")
             cleanup()
 
-            db = create_table(tech, f"bench_{tech}")
+            db = create_table(tech, f"bench_{tech}", n=n)
 
             # ── INSERT ──
             print(f"    Insertando {n:,} registros ...", end=" ", flush=True)
