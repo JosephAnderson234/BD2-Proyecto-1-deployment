@@ -42,6 +42,9 @@ def _write_records_to_file(records, path, record_format, page_size):
                 offset = j * record_size
                 page[offset] = 0                              # active flag
                 page[offset + 1: offset + record_size] = s.pack(*rec)
+            # Mark remaining slots as deleted so they aren't read back
+            for j in range(len(batch), records_per_page):
+                page[j * record_size] = 1
             f.write(page)
             pages_written += 1
 

@@ -18,7 +18,7 @@ if not os.path.exists(input_dir):
 
 os.makedirs(output_dir, exist_ok=True)
 
-for i in range(1, 9):
+for i in range(1, 2):
     filename = f"input{i}.txt"
     filepath = os.path.join(input_dir, filename)
     ast_filepath = os.path.join(input_dir, f"input{i}_ast.json")

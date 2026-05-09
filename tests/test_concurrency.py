@@ -557,7 +557,7 @@ def test_stress():
 # ================================================================== #
 
 def test_conflict_analysis():
-    header("TEST 12: Conflict analysis del log")
+    header("TEST 12: Conflict analysis del log + reporte a disco")
     cleanup()
     Transaction.reset_counter()
 
@@ -617,6 +617,11 @@ def test_conflict_analysis():
                   f"entre TX {c['transactions']}")
     else:
         print("  Sin conflictos (las TX no accedieron a mismas paginas)")
+
+    # Guardar reporte a disco
+    report_path = os.path.join("logs", "concurrency_report.txt")
+    tlog.save_report(report_path)
+    check(f"Reporte guardado en {report_path}", os.path.isfile(report_path))
 
     check("Analisis completo", True)
     cleanup()
